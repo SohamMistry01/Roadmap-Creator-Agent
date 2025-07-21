@@ -1,91 +1,63 @@
 import os
 import streamlit as st
+import requests
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
-from langgraph.graph import StateGraph, START, END
-from typing_extensions import TypedDict
 
-# Load environment variables
 load_dotenv()
-groq_api_key = os.getenv("GROQ_API_KEY")
-if groq_api_key is None:
-    st.error("GROQ_API_KEY environment variable is not set.")
+groq_key = os.getenv("GROQ_API_KEY")
+github_token = os.getenv("GITHUB_TOKEN")
+
+if not groq_key or not github_token:
+    st.error("Missing GROQ_API_KEY or GITHUB_TOKEN in environment.")
     st.stop()
-os.environ["GROQ_API_KEY"] = groq_api_key
 
-# Initialize LLM
-llm = ChatGroq(model="llama-3.3-70b-versatile")
+llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.5)
 
-# Define State
-class State(TypedDict):
-    name:str
-    career:str
-    repos:str
-    tech_stack:str
-    summary:str
+headers = {
+"Authorization": f"token {github_token}",
+"Accept": "application/vnd.github+json"
+}
 
-def top_github_repos(state:State):
-    msg=llm.invoke(f"""
-                   You are an expert roadmap creator.
-                   Generate a precise roadmap for user whose name is {state["name"]}.
-                   User wants to build a career in {state['career']}.
-                   Fetch the link of top GitHub repositories which provides roadmap based on {state['career']} in Markdown formatting.
-    """)
-    return {"repos":msg.content}
+st.title("📍 Roadmap Generator")
+st.write("Get a roadmap by exploring trending GitHub repositories in your chosen tech domain.")
 
-def list_tech_stack(state:State):
-    msg=llm.invoke(f"""
-                   Based on provided {state['career']}, create a list of technical skills required to master it.
-                   Create a bullet-wise list with Markdown formatting. 
-    """)
-    return {"tech_stack":msg.content}
+domain = st.text_input("Enter your domain (e.g., Data Science, Web Development, DevOps)")
 
-def generate_summary(state:State):
-    msg=llm.invoke(f"""
-                   After fetching top GitHub Repos from {state['repos']} and technical skill requirements from {state['tech_stack']},
-                   Now generate a brief summary to guide {state['name']} based on the given Roadmap.
-                   Use Markdown formatting.
-    """)
-    return {"summary":msg.content}
-
-# Build the graph
-graph = StateGraph(State)
-graph.add_node("GitHub Repos", top_github_repos)
-graph.add_node("Tech Stack", list_tech_stack)
-graph.add_node("Summarize", generate_summary)
-graph.add_edge(START,"GitHub Repos")
-graph.add_edge("GitHub Repos","Tech Stack")
-graph.add_edge("Tech Stack","Summarize")
-graph.add_edge("Summarize",END)
-compiled_graph = graph.compile()
-
-# Streamlit UI
-st.set_page_config(page_title="Roadmap Creator", page_icon=":briefcase:", layout="wide")
-st.title("Roadmap Creator Agent")
-st.write("Enter your details to get a personalized roadmap:")
-
-with st.form("career_form"):
-    name = st.text_input("Name")
-    career = st.text_input("Career Goal")
-    submitted = st.form_submit_button("Get Roadmap")
-
-if submitted:
-    if not all([name, career]):
-        st.warning("Please fill in all fields.")
+if st.button("Generate Roadmap"):
+    if not domain:
+        st.warning("Please enter a domain.")
     else:
-        with st.spinner("Generating your roadmap..."):
-            state = compiled_graph.invoke({
-                "name": name,
-                "career": career
-            })
-        st.markdown(state["repos"])
-        st.divider()
-        st.markdown(state["tech_stack"])
-        st.divider()
-        # Add download button for the career plan
-        st.download_button(
-            label="Download your Roadmap as Markdown",
-            data=state["summary"],
-            file_name=f"roadmap_{name.replace(' ', '_')}.md",
-            mime="text/markdown"
-        ) 
+        with st.spinner("Fetching trending GitHub repositories..."):
+            query = f"{domain} in:name,description"
+            url = f"https://api.github.com/search/repositories?q={query}&sort=stars&order=desc&per_page=5"
+            res = requests.get(url, headers=headers)
+            if res.status_code != 200:
+                st.error("GitHub API error. Try again later.")
+            else:
+                items = res.json().get("items", [])
+                repo_data = "\n".join(
+                    [f"{i+1}. {repo['name']}: {repo['description'] or 'No description'}" for i, repo in enumerate(items)]
+                )
+
+                prompt = f""" 
+                You are a career assistant AI.
+
+                Using the following top GitHub repositories in the domain of {domain}:
+                {repo_data}
+
+                Please generate a step-by-step skill-based learning roadmap. Include:
+
+                Key learning modules
+
+                Topics to cover (basic to advanced)
+
+                When and how to refer these repositories
+
+                Certifications or projects to build
+                Format the output using Markdown.
+                """
+                output = llm.invoke(prompt)
+                st.success("Here's your personalized roadmap:")
+                with st.expander("View Your Roadmap"):
+                    st.markdown(output.content)
